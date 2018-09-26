@@ -1,0 +1,111 @@
+---
+title: "GA_analytics"
+output: html_document
+---
+
+#### Objectives of the project
+We are predicting the natural log of the sum of all transactions per user.
+
+
+
+#### Packages
+Loading of packages
+```{r, Loading of packages}
+packages <- c("dplyr",
+              "magrittr",
+              "data.table",
+              "tidytext",
+              "ggplot2",
+              "lubridate",
+              "reshape2",
+              "knitr", 
+              "wordcloud",
+              "RColorBrewer",
+              "stingr",
+              "jsonlite")
+lapply(packages, require, character.only = TRUE)
+```
+
+Loading of data
+```{r, Loading of data}
+train <- read.csv("~/kaggle/train.csv")
+test <- read.csv("~/kaggle/test.csv")
+train <- train[1:1000,]
+test <- test[1:1000,]
+```
+
+Converting from json column to dataframe
+```{r, converting to Json}
+jsoncol <- c("device", "geoNetwork","totals","trafficSource")
+#convert to strings first
+train[jsoncol] <- lapply(train[jsoncol], as.character)
+test[jsoncol] <-lapply(test[jsoncol], as.character)
+
+for (i in 1:length(jsoncol))
+{
+  assign(paste0("train_var_", jsoncol[i]),train[jsoncol[i]])
+}
+
+for (i in 1:length(jsoncol))
+{
+  assign(paste0("test_var_", jsoncol[i]),test[jsoncol[i]])
+}
+
+#convert to normal text columns
+train_var_device <- train_var_device  %>% rowwise() %>%
+       do(data.frame(fromJSON(.$device, flatten = T))) %>% 
+  ungroup()
+train_var_geoNetwork <- train_var_geoNetwork  %>% rowwise() %>%
+  do(data.frame(fromJSON(.$geoNetwork, flatten = T))) %>% 
+  ungroup()
+train_var_totals <- train_var_totals  %>% rowwise() %>%
+  do(data.frame(fromJSON(.$totals, flatten = T))) %>% 
+  ungroup()
+test_var_device <- test_var_device  %>% rowwise() %>%
+       do(data.frame(fromJSON(.$device, flatten = T))) %>% 
+  ungroup()
+test_var_geoNetwork <- test_var_geoNetwork  %>% rowwise() %>%
+  do(data.frame(fromJSON(.$geoNetwork, flatten = T))) %>% 
+  ungroup()
+test_var_totals <- test_var_totals  %>% rowwise() %>%
+  do(data.frame(fromJSON(.$totals, flatten = T))) %>% 
+  ungroup()
+# based on this idea: https://www.kaggle.com/mrlong/r-flatten-json-columns-to-make-single-data-frame
+test_var_trafficSource <- paste("[", paste(test_var_trafficSource$trafficSource, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+train_var_trafficSource <- paste("[", paste(train_var_trafficSource$trafficSource, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+
+#combine everything to a single df
+train_df <- train %>% select(-jsoncol) 
+test_df <- test %>% select(-jsoncol) 
+train_df <- cbind(train_df, train_var_device, train_var_geoNetwork,
+               train_var_totals,train_var_trafficSource)
+test_df <- cbind(test_df, test_var_device,test_var_geoNetwork,
+               test_var_totals,test_var_trafficSource)
+```
+
+Converting the dataframe into the right format
+ - Converting the fullvisior id column into string 
+ - Converting the date into proper date format
+```{r, converting the df to column}
+train_df[c("fullVisitorId","date")] <- lapply(train_df[c("fullVisitorId","date")], as.character)
+test_df[c("fullVisitorId","date")]<-lapply(test_df[c("fullVisitorId","date")], as.character)
+train_df$date <- as.Date(train_df$date, format ="%Y%m%d")
+test_df$date <- as.Date(test_df$date, format ="%Y%m%d")
+```
+
+Checking which data have the highest "NA" values and we need to remove the columns, and we dont use it in our analysis
+  - Rows with NA percentage more than 70%, we discard.
+```{r, NA values in df}
+na_colmean <- colMeans(is.na(train_df)) 
+discard_col <- c("bounces", "transactionRevenue", "adContent",
+                 "adwordsClickInfo.page", "adwordsClickInfo.slot",
+                 "adwordsClickInfo.gclId", "adwordsClickInfo.adNetworkType",
+                 "adwordsClickInfo.isVideoAd","isTrueDirect",
+                 "referralPath")
+
+train_df <-train_df %>% select(-discard_col)
+```
+
+

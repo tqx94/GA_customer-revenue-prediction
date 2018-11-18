@@ -1,0 +1,211 @@
+---
+title: "Google Analytics Customer Revenue Prediction"
+author: "Farren"
+date: "22/09/2018"
+output: html_document
+---
+
+Objective
+Loading of packages
+```{r, Loading of packages}
+packages <- c("dplyr",
+              "magrittr",
+              "data.table",
+              "tidytext",
+              "ggplot2",
+              "lubridate",
+              "reshape2",
+              "wordcloud",
+              "RColorBrewer",
+              "stringr",
+              "jsonlite",
+              "caret",
+              "scales",
+              "gridExtra",
+              "xgboost")
+lapply(packages, require, character.only = TRUE)
+#for (i in 2:length(packages))
+#{
+ # install.packages(packages[i])
+#}
+
+```
+
+Loading of data
+```{r, loading of packages,cache = TRUE}
+test <- read.csv("~/Documents/kaggle/google_analytics_customer_review/test.csv")
+train <- read.csv("~/Documents/kaggle/google_analytics_customer_review/train.csv")
+```
+Converting from json column to dataframe
+```{r, converting to Json}
+jsoncol <- c("device", "geoNetwork","totals","trafficSource")
+#convert to strings first
+train[jsoncol] <- lapply(train[jsoncol], as.character)
+test[jsoncol] <-lapply(test[jsoncol], as.character)
+
+for (i in 1:length(jsoncol))
+{
+  assign(paste0("train_var_", jsoncol[i]),train[jsoncol[i]])
+}
+
+for (i in 1:length(jsoncol))
+{
+  assign(paste0("test_var_", jsoncol[i]),test[jsoncol[i]])
+}
+
+# based on this idea: https://www.kaggle.com/mrlong/r-flatten-json-columns-to-make-single-data-frame
+test_var_trafficSource <- paste("[", paste(test_var_trafficSource$trafficSource, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+test_var_device <- paste("[", paste(test_var_device$device, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+test_var_geoNetwork <- paste("[", paste(test_var_geoNetwork$geoNetwork, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+test_var_totals <- paste("[", paste(test_var_totals$totals, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+train_var_device <- paste("[", paste(train_var_device$device, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+train_var_geoNetwork <- paste("[", paste(train_var_geoNetwork$geoNetwork, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+train_var_totals <- paste("[", paste(train_var_totals$totals, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+train_var_trafficSource <- paste("[", paste(train_var_trafficSource$trafficSource, collapse = ","), "]") %>% 
+  fromJSON(flatten = T)
+#combine everything to a single df
+train_df <- train %>% select(-jsoncol) 
+test_df <- test %>% select(-jsoncol) 
+train_df <- cbind(train_df, train_var_device, train_var_geoNetwork,
+               train_var_totals,train_var_trafficSource)
+test_df <- cbind(test_df, test_var_device,test_var_geoNetwork,
+               test_var_totals,test_var_trafficSource)
+```
+
+Converting the dataframe into the right format
+ - Converting the fullvisior id column into string 
+ - Converting the date into proper date format
+```{r, converting the df to column}
+train_df[c("fullVisitorId","date")] <- lapply(train_df[c("fullVisitorId","date")], as.character)
+test_df[c("fullVisitorId","date")]<-lapply(test_df[c("fullVisitorId","date")], as.character)
+train_df[c("hits","pageviews","bounces","newVisits")] <- lapply(train_df[c("hits","pageviews","bounces","newVisits")], as.numeric)
+test_df[c("hits","pageviews","bounces","newVisits")] <- lapply(test_df[c("hits","pageviews","bounces","newVisits")], as.numeric)
+train_df[c("browser","operatingSystem","deviceCategory","continent","subContinent","country","source","medium")] <- lapply(train_df[c("browser","operatingSystem","deviceCategory","continent","subContinent","country","source","medium")], as.factor)
+test_df[c("browser","operatingSystem","deviceCategory","continent","subContinent","country","source","medium")] <- lapply(test_df[c("browser","operatingSystem","deviceCategory","continent","subContinent","country","source","medium")], as.factor)
+train_df$date <- as.Date(train_df$date, format ="%Y%m%d")
+test_df$date <- as.Date(test_df$date, format ="%Y%m%d")
+```
+
+Manipulating of columns
+- Removing columns that only have 1 unique value, since it doesnt value add
+- Removing columns that the test data dont have - campaign code
+- Note: transaction value na implies 0 transaction
+  
+```{r, NA values in df}
+train_df <- train_df %>% mutate(transactionRevenue = ifelse(is.na(transactionRevenue)==1,0,
+                                                            transactionRevenue))
+uni_val <- apply(train_df, 2, function(x) length(unique(x)))
+uni_val <- data.frame(uni_val)
+names(uni_val) <- "count"
+uni_val <- uni_val %>% mutate(varnames = rownames(uni_val))
+discard_col <- uni_val %>% filter(count == 1) %>% select(varnames) %>% unlist()
+train_df <- train_df %>% select(-discard_col)
+test_df <- test_df %>% select(-discard_col)
+#finding the columns which are in set A and not in set B
+test_names <- names(test_df) 
+train_names <- names(train_df)
+setdiff(train_names, test_names)
+
+train_df <- train_df %>% select(-campaignCode)
+```
+
+Creating log transformation of the transaction revenue, so we can predict
+```{r, logtrans}
+train_df$log_transactionRevenue <- log(as.numeric(train_df$transactionRevenue)+1)
+train_df <- train_df %>% select(-transactionRevenue)
+```
+
+#Creating a validation set
+```{r, validationset}
+set.seed(1234)
+#Get training and test set
+inbuild <- createDataPartition(y=train_df$log_transactionRevenue, p =0.7, list =FALSE)
+#validation and training
+builddata <- train_df[inbuild,]
+validation <- train_df[-inbuild,]
+```
+
+#### EDA of the predictors
+We have to do an eda of a training dataset to see how they are spread out, so we can preprocess those highly skewed variable
+1. Predictor variable in the training dataset - Heavily left skewed and many of them are 0.
+```{r, EDA of training dataset}
+ggplot(train_df %>% mutate(x = ifelse(log_transactionRevenue==0,"0",">0"))) +
+        geom_density(aes(x = log_transactionRevenue, color = x)) +
+        ggtitle("Density plot of predictor variable") 
+```
+2.Understanding the patterns of revenue over the year and to see if the days of the week affect the revenue. We realised that during holiday season(December), the revenue of the store data tend to be higher. 
+```{r, revenue across year}
+#revenue across year for all days
+train_df_revenue_pattern <- train_df %>% data.table()
+train_df_revenue_pattern<-train_df_revenue_pattern[,.(log_transactionRevenue=median(log_transactionRevenue), deviation=sd(log_transactionRevenue)), by=.(date)]
+train_df_revenue_pattern[, low := log_transactionRevenue - deviation]
+train_df_revenue_pattern[, high := log_transactionRevenue + deviation]
+ggplot(train_df_revenue_pattern,aes(x=as.POSIXct.Date(date), y=log_transactionRevenue, group = 1)) + geom_line() + theme_minimal() + 
+ geom_ribbon(aes(ymin=low, ymax=high), alpha=0.5, fill="grey50") +
+ theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank()) +
+ theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+ scale_x_datetime(breaks = date_breaks("1 month"), 
+                  expand = c(0,0)) 
+```
+3. Plotting revenue and number of session graphs of important vars.
+Function taken from this kernal: https://www.kaggle.com/erikbruin/google-analytics-eda-lightgbm-screenshots
+```{r, important variables-function}
+plotSessions <- function(dataframe, factorVariable, topN=10) {
+    var_col <- enquo(factorVariable)
+    dataframe %>% count(!!var_col) %>% top_n(topN, wt=n) %>%
+    ggplot(aes_(x=var_col, y=~n, fill=var_col)) +
+    geom_bar(stat='identity')+
+    scale_y_continuous(labels=comma)+
+    labs(x="", y="number of sessions")+
+    theme(legend.position="none")
+    }
+
+#also creating a function to plot transactionRevenue for a factorvariable
+plotRevenue <- function(dataframe, factorVariable, topN=10) {
+    var_col <- enquo(factorVariable)
+    dataframe %>% group_by(!!var_col) %>% summarize(rev=sum(log_transactionRevenue)) %>% filter(rev>0) %>% top_n(topN, wt=rev) %>% ungroup() %>%
+    ggplot(aes_(x=var_col, y=~rev, fill=var_col)) +
+    geom_bar(stat='identity')+
+    scale_y_continuous(labels=comma)+
+    labs(x="", y="Revenues (USD)")+
+    theme(legend.position="none")
+}
+```
+
+
+A.  By channel grouping, we can see that referral has the highest number of revenues, but has slightly lesser sesions as compared to the other channels. Organic Search has 
+```{r, important variables - graphs-Channel}
+sessionOrder <- builddata %>% count(channelGrouping) %>% top_n(10, wt=n) %>% arrange(desc(n))
+sessionOrder <- sessionOrder$channelGrouping
+
+c1 <- plotSessions(builddata, channelGrouping) + scale_x_discrete(limits=sessionOrder)
+c2 <- plotRevenue(builddata, channelGrouping) + scale_x_discrete(limits=sessionOrder)
+grid.arrange(c1, c2)
+```
+
+B. Unsurprisingly, desktop has the highest number of revenue and sessions
+```{r, important variables - graphs}
+d1 <- plotSessions(builddata, deviceCategory) 
+d2 <- plotRevenue(builddata, deviceCategory)
+grid.arrange(d1, d2)
+```
+
+C. Safari and firefox has one of the highest number of sessions, but they produced relatively lesser revenues. 
+```{r, important variables - graphs}
+browser_color <- builddata %>% count(browser) %>% 
+  top_n(10, wt=n) %>% select(browser) %>% unlist()
+
+b1 <- plotSessions(builddata, browser) + coord_flip() + scale_x_discrete(limits=browser_color)
+b2 <- plotRevenue(builddata, browser) + coord_flip()+ 
+  scale_x_discrete(limits=browser_color)
+grid.arrange(b1, b2)
+```
+
+

@@ -3,6 +3,9 @@ title: "revenue_practice"
 output: html_document
 ---
 
+Google revenue analytics: Taken from: https://www.kaggle.com/kailex/r-eda-for-gstore-glm-keras-xgb 
+
+
 Objective
 Loading of packages
 ```{r, Loading of packages}
@@ -20,7 +23,8 @@ packages <- c("dplyr",
               "caret",
               "scales",
               "gridExtra",
-              "xgboost")
+              "xgboost",
+              "keras")
 lapply(packages, require, character.only = TRUE)
 #for (i in 2:length(packages))
 #{
@@ -191,4 +195,73 @@ pred_xgb_tr <- predict(m_xgb, dtrain)
 pred_xgb <- predict(m_xgb, dtest) 
 sub <- "xgb_gs.csv"
 submit(pred_xgb)
+```
+
+GLMNET function
+```{r, glmnet function}
+tr_te_ohe <- tr_te %>% 
+  mutate_if(is.factor, fct_explicit_na) %>% 
+  mutate_if(is.numeric, funs(ifelse(is.na(.), 0L, .))) %>% 
+  mutate_if(is.factor, fct_lump, prop = 0.05) %>% 
+  select(-adwordsClickInfo.isVideoAd) %>% 
+  model.matrix(~.-1, .) %>% 
+  scale() %>% 
+  round(4)
+
+X <- tr_te_ohe[tri, ]
+X_test <- tr_te_ohe[-tri, ]
+rm(tr_te_ohe); invisible(gc())
+```
+
+Creating a cv lasso model
+```{r, CV lasso model}
+m_glm <- cv.glmnet(X, log1p(y), alpha = 0, family="gaussian", 
+                   type.measure = "mse", nfolds = 5)
+```
+
+```{r, predictions of a Lasso model}
+pred_glm_tr <- predict(m_glm, X, s = "lambda.min") %>% c()
+pred_glm <- predict(m_glm, X_test, s = "lambda.min") %>% c()
+sub <- "glmnet_gs.csv"
+submit(pred_glm)
+
+rm(m_glm); invisible(gc())
+```
+
+Keras function - Neural net function
+```{r, neural net}
+m_nn <- keras_model_sequential()
+m_nn %>% 
+  layer_dense(units = 256, activation = "relu", input_shape = ncol(X)) %>% 
+  layer_dropout(rate = 0.5) %>% 
+  layer_dense(units = 128, activation = "relu") %>%
+  layer_dropout(rate = 0.25) %>%
+  layer_dense(units = 1, activation = "linear")
+```
+
+compile with apporiate parameters
+```{r, app parameters}
+m_nn %>% compile(loss = "mean_squared_error",
+                 metrics = custom_metric("rmse", function(y_true, y_pred) 
+                   k_sqrt(metric_mean_squared_error(y_true, y_pred))),
+                 optimizer = optimizer_adadelta())
+```
+
+```{r, train the model}
+history <- m_nn %>% 
+  fit(X, log1p(y), 
+      epochs = 50, 
+      batch_size = 128, 
+      verbose = 0, 
+      validation_split = 0.2,
+      callbacks = callback_early_stopping(patience = 5))
+```
+
+```{r, predictions}
+pred_nn_tr <- predict(m_nn, X) %>% c()
+pred_nn <- predict(m_nn, X_test) %>% c()
+sub <- "keras_gs.csv"
+submit(pred_nn)
+
+rm(m_nn, X, X_test); invisible(gc())
 ```
